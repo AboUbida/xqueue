@@ -1,5 +1,12 @@
 # One feed per line. Lines starting with # are ignored.
 # Format:  Name shown as the source | feed URL     (the name is optional)
-# Add or remove feeds to change what the account posts about.
+# Posts are spread across the feeds, so the mix here sets the mix of topics.
+
+# Tech
 البوابة التقنية | https://aitnews.com/feed/
 عالم التقنية | https://www.tech-wd.com/wd/feed/
+
+# Football
+الرياضية | https://arriyadiyah.com/rss
+# Unverified extra football feed (Arab football from FilGoal); remove the # to try it:
+# في الجول | https://www.filgoal.com/section/9/rss/%D8%A7%D9%84%D9%88%D8%B7%D9%86-%D8%A7%D9%84%D8%B9%D8%B1%D8%A8%D9%8A
