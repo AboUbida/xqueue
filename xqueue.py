@@ -6,11 +6,16 @@ Two modes, chosen by whether sources.txt exists:
     about the newest items;
   - without it: writes evergreen posts from the topic in brief.txt.
 
+Each run tops the Buffer queue up to QUEUE_TARGET posts, so a failed run is
+covered by the posts already waiting. Busy or rate-limited services are retried.
+
 Required env:  BUFFER_KEY, LLM_KEY
 Optional env:  BUFFER_CHANNEL_ID (found automatically when the account has one
                X channel), LLM_URL and LLM_MODEL (any OpenAI-compatible endpoint;
-               defaults to the Gemini API), POSTS_PER_RUN, BRIEF_FILE,
-               SOURCES_FILE, HISTORY_FILE, MAX_AGE_DAYS, CREDIT_PREFIX, DRY_RUN=1
+               defaults to the Gemini API), QUEUE_TARGET, MAX_PER_RUN,
+               POSTS_PER_RUN (used only if the queue size cannot be read),
+               BRIEF_FILE, SOURCES_FILE, HISTORY_FILE, MAX_AGE_DAYS,
+               CREDIT_PREFIX, RETRY_BASE_SECONDS, DRY_RUN=1
 """
 import datetime
 import email.utils
@@ -20,6 +25,7 @@ import os
 import pathlib
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -29,7 +35,10 @@ BUFFER_URL = os.environ.get("BUFFER_URL") or "https://api.buffer.com"
 LLM_URL = os.environ.get("LLM_URL") or "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 LLM_KEY = os.environ.get("LLM_KEY") or ""
 LLM_MODEL = os.environ.get("LLM_MODEL") or "gemini-3.8-flash"
-COUNT = int(os.environ.get("POSTS_PER_RUN") or "2")
+QUEUE_TARGET = int(os.environ.get("QUEUE_TARGET") or "6")  # posts to keep waiting in Buffer (free plan max is 10)
+MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN") or "6")
+FALLBACK_COUNT = int(os.environ.get("POSTS_PER_RUN") or "2")  # used when the queue size cannot be read
+RETRY_BASE = float(os.environ.get("RETRY_BASE_SECONDS") or "15")
 BRIEF = pathlib.Path(os.environ.get("BRIEF_FILE", "brief.txt"))
 SOURCES = pathlib.Path(os.environ.get("SOURCES_FILE", "sources.txt"))
 HISTORY = pathlib.Path(os.environ.get("HISTORY_FILE", "history.jsonl"))
@@ -41,31 +50,36 @@ MAX_LEN = 280
 USER_AGENT = "xqueue/1.1 (personal RSS reader)"
 
 
-def post_json(url, key, payload):
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            body = resp.read().decode(errors="replace")
-            status, ctype, final = resp.status, resp.headers.get("Content-Type"), resp.geturl()
-    except urllib.error.HTTPError as e:
-        retry = e.headers.get("Retry-After")
-        hint = f" (retry after {retry}s)" if retry else ""
-        sys.exit(f"HTTP {e.code} from {url}{hint}: {e.read().decode(errors='replace')[:300]}")
-    except OSError as e:
-        sys.exit(f"Could not reach {url}: {e}")
-    try:
-        return json.loads(body)
-    except ValueError:
-        sys.exit(f"{url} answered HTTP {status} ({ctype}) but not JSON, so the service is not working as "
-                 f"expected. Final URL: {final}. Body starts: {body[:200]!r}")
+TRANSIENT = {408, 425, 429, 500, 502, 503, 504}  # busy, rate-limited or briefly down: worth retrying
+
+
+def post_json(url, key, payload, attempts=1):
+    """POST JSON and return the parsed reply, retrying transient failures up to `attempts` times."""
+    data = json.dumps(payload).encode()
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", "User-Agent": USER_AGENT}
+    for attempt in range(1, attempts + 1):
+        wait = None
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, data=data, headers=headers), timeout=120) as resp:
+                body = resp.read().decode(errors="replace")
+                status, ctype = resp.status, resp.headers.get("Content-Type")
+            try:
+                return json.loads(body)
+            except ValueError:
+                problem = f"HTTP {status} ({ctype}) but not JSON; body starts {body[:200]!r}"
+        except urllib.error.HTTPError as e:
+            problem = f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}"
+            if e.code not in TRANSIENT:
+                sys.exit(f"{url} failed with {problem}")
+            retry_after = (e.headers.get("Retry-After") or "").strip()
+            wait = int(retry_after) if retry_after.isdigit() else None
+        except OSError as e:  # timeouts, DNS failures, dropped connections
+            problem = f"could not connect: {e}"
+        if attempt == attempts:
+            sys.exit(f"{url} failed after {attempts} attempt(s): {problem}")
+        wait = min(wait if wait is not None else RETRY_BASE * 2 ** (attempt - 1), 120)
+        print(f"RETRY {problem[:150]} (waiting {wait:.0f}s, attempt {attempt + 1} of {attempts})")
+        time.sleep(wait)
 
 
 def load_history():
@@ -196,28 +210,33 @@ def load_items(used_links):
 # ---------- drafting ----------
 
 def ask_llm(system, user):
-    out = post_json(LLM_URL, LLM_KEY, {
-        "model": LLM_MODEL,
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-    })
-    raw = out["choices"][0]["message"]["content"]
-    start, end = raw.find("["), raw.rfind("]")
-    if start == -1 or end == -1:
-        sys.exit(f"LLM did not return a JSON array: {raw[:300]}")
-    try:
-        return json.loads(raw[start:end + 1])
-    except ValueError:
-        sys.exit(f"LLM returned invalid JSON: {raw[:300]}")
+    for attempt in (1, 2):
+        out = post_json(LLM_URL, LLM_KEY, {
+            "model": LLM_MODEL,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        }, attempts=4)
+        try:
+            raw = out["choices"][0]["message"]["content"]
+            start, end = raw.find("["), raw.rfind("]")
+            if start == -1 or end < start:
+                raise ValueError("no JSON array")
+            result = json.loads(raw[start:end + 1])
+            if isinstance(result, list):
+                return result
+        except (KeyError, IndexError, TypeError, ValueError):
+            pass
+        print(f"RETRY model reply was not a JSON array: {str(out)[:200]}")
+    sys.exit("The model did not return usable posts after 2 tries.")
 
 
 def recent_posts(history):
     return "\n".join(f"- {h['text']}" for h in history[-30:]) or "(none yet)"
 
 
-def draft_from_topic(history):
+def draft_from_topic(history, count):
     system = (
         f"{BRIEF.read_text(encoding='utf-8').strip()}\n\n"
-        f"Write {COUNT} new posts for X. Each must be under {MAX_LEN - 10} characters, "
+        f"Write {count} new posts for X. Each must be under {MAX_LEN - 10} characters, "
         "stand alone, and contain no links. Do not repeat or closely paraphrase these recent posts:\n"
         f"{recent_posts(history)}\n\n"
         "Reply with only a JSON array of strings."
@@ -225,12 +244,12 @@ def draft_from_topic(history):
     return [(str(p).strip(), None) for p in ask_llm(system, "Write the posts now.")]
 
 
-def draft_from_items(items, history):
+def draft_from_items(items, history, count):
     credits = {i["source"]: f"\n\n{CREDIT_PREFIX}{i['source']}" if CREDIT_PREFIX else "" for i in items}
     limit = MAX_LEN - max(len(c) for c in credits.values()) - 10
     system = (
         f"{BRIEF.read_text(encoding='utf-8').strip()}\n\n"
-        f"The user message lists numbered items from the account's sources. Choose the {COUNT} most "
+        f"The user message lists numbered items from the account's sources. Choose the {count} most "
         "interesting for the audience, each on a different subject and spread across different sources "
         "where possible, and write one post for each.\n"
         "- Use only facts stated in the item. Do not add details, numbers, quotes or opinions that are not there.\n"
@@ -259,27 +278,40 @@ def draft_from_items(items, history):
 # ---------- Buffer ----------
 
 def buffer(query):
-    out = post_json(BUFFER_URL, os.environ["BUFFER_KEY"], {"query": query})
+    out = post_json(BUFFER_URL, os.environ["BUFFER_KEY"], {"query": query}, attempts=3)
     if out.get("errors"):
         sys.exit(f"Buffer error: {out['errors'][0].get('message', out['errors'])}")
     return out.get("data") or {}
 
 
 def find_channel():
-    """Use BUFFER_CHANNEL_ID if set; otherwise find the account's single X channel."""
-    channel = os.environ.get("BUFFER_CHANNEL_ID", "").strip()
-    if channel:
-        return channel
+    """Return (organization id, channel id): BUFFER_CHANNEL_ID if set, else the account's single X channel."""
+    wanted = os.environ.get("BUFFER_CHANNEL_ID", "").strip()
     found = []
     for org in buffer("{ account { organizations { id } } }")["account"]["organizations"]:
         q = "{ channels(input: { organizationId: %s }) { id service name } }" % json.dumps(org["id"])
-        found += buffer(q)["channels"]
+        found += [dict(c, org=org["id"]) for c in buffer(q)["channels"]]
     listing = "\n".join(f"  {c['id']}  {c['service']}  {c['name']}" for c in found) or "  (none)"
-    x = [c for c in found if str(c["service"]).lower() in ("twitter", "x")]
-    if len(x) != 1:
-        sys.exit(f"Expected exactly one X channel, found {len(x)}. Set BUFFER_CHANNEL_ID to one of:\n{listing}")
-    print(f"Using X channel {x[0]['id']} ({x[0]['name']})")
-    return x[0]["id"]
+    if wanted:
+        match = [c for c in found if c["id"] == wanted]
+    else:
+        match = [c for c in found if str(c["service"]).lower() in ("twitter", "x")]
+    if len(match) != 1:
+        sys.exit(f"Could not pick one X channel (found {len(match)}). Set BUFFER_CHANNEL_ID to one of:\n{listing}")
+    print(f"Using X channel {match[0]['id']} ({match[0]['name']})")
+    return match[0]["org"], match[0]["id"]
+
+
+def queued_count(org, channel):
+    """How many posts are already waiting in this channel's queue, or None if Buffer will not say."""
+    q = ("{ posts(input: { organizationId: %s, filter: { status: [scheduled], channelIds: [%s] } }) "
+         "{ edges { node { id } } } }") % (json.dumps(org), json.dumps(channel))
+    out = post_json(BUFFER_URL, os.environ["BUFFER_KEY"], {"query": q}, attempts=3)
+    try:
+        return len(out["data"]["posts"]["edges"])
+    except (KeyError, TypeError):
+        print(f"WARN  could not read the queue size: {str(out.get('errors') or out)[:200]}")
+        return None
 
 
 def queue(text, channel):
@@ -301,11 +333,22 @@ def queue(text, channel):
 
 
 def main():
-    channel = find_channel()  # read-only, so it also runs in a dry run to check the Buffer key
+    org, channel = find_channel()  # read-only, so it also runs in a dry run to check the Buffer key
     if not BRIEF.exists():
         sys.exit(f"Missing {BRIEF}: write a few lines on audience, tone and language.")
     if not LLM_KEY:
         sys.exit("Missing LLM_KEY: add the model API key as a repository secret named LLM_KEY.")
+    waiting = queued_count(org, channel)
+    if waiting is None:
+        count = FALLBACK_COUNT
+    else:
+        count = max(0, min(QUEUE_TARGET - waiting, MAX_PER_RUN))
+    print(f"QUEUE {waiting if waiting is not None else '?'} waiting, target {QUEUE_TARGET}: adding {count}")
+    if DRY_RUN:
+        count = max(count, 2)  # always show some drafts in a dry run
+    if count == 0:
+        return
+
     history = load_history()
     seen_text = {h["text"].casefold() for h in history}
     seen_links = {h["link"] for h in history if h.get("link")}
@@ -315,12 +358,14 @@ def main():
         if not items:
             print("No fresh items in any source; nothing to post this run.")
             return
-        drafts = draft_from_items(items, history)
+        drafts = draft_from_items(items, history, count + 2)  # extras cover drafts the checks reject
     else:
-        drafts = draft_from_topic(history)
+        drafts = draft_from_topic(history, count + 2)
 
-    queued = 0
-    for text, link in drafts[:COUNT]:
+    queued = shown = 0
+    for text, link in drafts:
+        if queued >= count or (DRY_RUN and shown >= count):
+            break
         has_url = re.search(r"https?://|www\.", text, re.I)  # posts must not carry links, whatever the model wrote
         if not text or has_url or len(text) > MAX_LEN or text.casefold() in seen_text or (link and link in seen_links):
             print(f"SKIP  {text[:60]!r}")
@@ -330,6 +375,7 @@ def main():
             seen_links.add(link)
         if DRY_RUN:
             print(f"DRY   {text}\n")
+            shown += 1
             continue
         post_id, err = queue(text, channel)
         if err:
