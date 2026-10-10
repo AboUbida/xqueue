@@ -1,0 +1,5 @@
+# One feed per line. Lines starting with # are ignored.
+# Format:  Name shown as the source | feed URL     (the name is optional)
+# Add or remove feeds to change what the account posts about.
+البوابة التقنية | https://aitnews.com/feed/
+عالم التقنية | https://www.tech-wd.com/wd/feed/
