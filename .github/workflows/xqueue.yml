@@ -2,7 +2,7 @@ name: xqueue
 
 on:
   schedule:
-    - cron: '17 6 * * *'   # 09:17 Riyadh, every day
+    - cron: '17 6,10,14,18 * * *'   # 09:17, 13:17, 17:17, 21:17 Riyadh
   workflow_dispatch:
     inputs:
       dry_run:
