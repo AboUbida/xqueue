@@ -1,0 +1,41 @@
+name: xqueue
+
+on:
+  schedule:
+    - cron: '17 6 * * *'   # 09:17 Riyadh, every day
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print the drafts without queuing them
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # save history.jsonl back to the repo
+  models: read      # lets GITHUB_TOKEN call GitHub Models for the drafts
+
+concurrency: xqueue
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Draft and queue posts
+        run: python3 xqueue.py
+        env:
+          BUFFER_KEY: ${{ secrets.BUFFER_KEY }}
+          BUFFER_CHANNEL_ID: ${{ vars.BUFFER_CHANNEL_ID }}
+          LLM_URL: https://models.github.ai/inference/chat/completions
+          LLM_KEY: ${{ secrets.GITHUB_TOKEN }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'openai/gpt-4o' }}
+          POSTS_PER_RUN: ${{ vars.POSTS_PER_RUN || '2' }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+      - name: Save history
+        if: always()
+        run: |
+          [ -f history.jsonl ] || exit 0
+          git add history.jsonl
+          git diff --cached --quiet && exit 0
+          git -c user.name=xqueue -c user.email=xqueue@users.noreply.github.com commit -m "Update post history"
+          git push
