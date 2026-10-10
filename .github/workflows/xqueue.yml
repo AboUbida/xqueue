@@ -12,7 +12,6 @@ on:
 
 permissions:
   contents: write   # save history.jsonl back to the repo
-  models: read      # lets GITHUB_TOKEN call GitHub Models for the drafts
 
 concurrency: xqueue
 
@@ -26,9 +25,9 @@ jobs:
         env:
           BUFFER_KEY: ${{ secrets.BUFFER_KEY }}
           BUFFER_CHANNEL_ID: ${{ vars.BUFFER_CHANNEL_ID }}
-          LLM_URL: https://models.github.ai/inference/chat/completions
-          LLM_KEY: ${{ secrets.GITHUB_TOKEN }}
-          LLM_MODEL: ${{ vars.LLM_MODEL || 'openai/gpt-4o' }}
+          LLM_URL: ${{ vars.LLM_URL }}
+          LLM_KEY: ${{ secrets.LLM_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
           POSTS_PER_RUN: ${{ vars.POSTS_PER_RUN || '2' }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
       - name: Save history

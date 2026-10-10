@@ -6,10 +6,10 @@ Two modes, chosen by whether sources.txt exists:
     about the newest items, crediting the source by name;
   - without it: writes evergreen posts from the topic in brief.txt.
 
-Required env:  BUFFER_KEY
+Required env:  BUFFER_KEY, LLM_KEY
 Optional env:  BUFFER_CHANNEL_ID (found automatically when the account has one
-               X channel), LLM_URL, LLM_KEY, LLM_MODEL (any OpenAI-compatible
-               endpoint; defaults to a local Ollama), POSTS_PER_RUN, BRIEF_FILE,
+               X channel), LLM_URL and LLM_MODEL (any OpenAI-compatible endpoint;
+               defaults to the Gemini API), POSTS_PER_RUN, BRIEF_FILE,
                SOURCES_FILE, HISTORY_FILE, MAX_AGE_DAYS, CREDIT_PREFIX, DRY_RUN=1
 """
 import datetime
@@ -24,10 +24,11 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 
-BUFFER_URL = os.environ.get("BUFFER_URL", "https://api.buffer.com")
-LLM_URL = os.environ.get("LLM_URL", "http://localhost:11434/v1/chat/completions")
-LLM_KEY = os.environ.get("LLM_KEY", "ollama")
-LLM_MODEL = os.environ.get("LLM_MODEL", "llama3.1")
+# "or" rather than a .get default: GitHub Actions passes unset variables as empty strings.
+BUFFER_URL = os.environ.get("BUFFER_URL") or "https://api.buffer.com"
+LLM_URL = os.environ.get("LLM_URL") or "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+LLM_KEY = os.environ.get("LLM_KEY") or ""
+LLM_MODEL = os.environ.get("LLM_MODEL") or "gemini-3.8-flash"
 COUNT = int(os.environ.get("POSTS_PER_RUN") or "2")
 BRIEF = pathlib.Path(os.environ.get("BRIEF_FILE", "brief.txt"))
 SOURCES = pathlib.Path(os.environ.get("SOURCES_FILE", "sources.txt"))
@@ -51,11 +52,19 @@ def post_json(url, key, payload):
     )
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.load(resp)
+            body = resp.read().decode(errors="replace")
+            status, ctype, final = resp.status, resp.headers.get("Content-Type"), resp.geturl()
     except urllib.error.HTTPError as e:
         retry = e.headers.get("Retry-After")
         hint = f" (retry after {retry}s)" if retry else ""
         sys.exit(f"HTTP {e.code} from {url}{hint}: {e.read().decode(errors='replace')[:300]}")
+    except OSError as e:
+        sys.exit(f"Could not reach {url}: {e}")
+    try:
+        return json.loads(body)
+    except ValueError:
+        sys.exit(f"{url} answered HTTP {status} ({ctype}) but not JSON, so the service is not working as "
+                 f"expected. Final URL: {final}. Body starts: {body[:200]!r}")
 
 
 def load_history():
@@ -252,6 +261,8 @@ def main():
     channel = find_channel()  # read-only, so it also runs in a dry run to check the Buffer key
     if not BRIEF.exists():
         sys.exit(f"Missing {BRIEF}: write a few lines on audience, tone and language.")
+    if not LLM_KEY:
+        sys.exit("Missing LLM_KEY: add the model API key as a repository secret named LLM_KEY.")
     history = load_history()
     seen_text = {h["text"].casefold() for h in history}
     seen_links = {h["link"] for h in history if h.get("link")}
