@@ -37,6 +37,7 @@ jobs:
           LLM_KEY: ${{ secrets.LLM_KEY }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           POSTS_PER_RUN: ${{ vars.POSTS_PER_RUN || '2' }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
           MEDIA_REPO: ${{ vars.MEDIA_REPO }}
           MEDIA_TOKEN: ${{ secrets.MEDIA_TOKEN }}
           CARD_BRAND: ${{ vars.CARD_BRAND }}
@@ -52,8 +53,7 @@ jobs:
       - name: Save history
         if: always()
         run: |
-          [ -f history.jsonl ] || exit 0
-          git add history.jsonl
+          git add history.jsonl xstate.json 2>/dev/null || git add history.jsonl 2>/dev/null || exit 0
           git diff --cached --quiet && exit 0
           git -c user.name=xqueue -c user.email=xqueue@users.noreply.github.com commit -m "Update post history"
           git pull --rebase --quiet && git push
