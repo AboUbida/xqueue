@@ -40,8 +40,9 @@ jobs:
           X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
           LIVE_MAX_PER_DAY: ${{ vars.LIVE_MAX_PER_DAY }}
           LIVE_GAP_MINUTES: ${{ vars.LIVE_GAP_MINUTES }}
-          MEDIA_REPO: ${{ vars.MEDIA_REPO }}
-          MEDIA_TOKEN: ${{ secrets.MEDIA_TOKEN }}
+          MEDIA_REPO: ${{ vars.MEDIA_REPO || github.repository }}   # cards live on this repo's media branch
+          MEDIA_TOKEN: ${{ secrets.MEDIA_TOKEN || github.token }}
+          MEDIA_BRANCH: ${{ vars.MEDIA_BRANCH || 'media' }}
           CARD_BRAND: ${{ vars.CARD_BRAND }}
           OWN_CARDS: ${{ vars.OWN_CARDS }}
           REVIEW: ${{ vars.REVIEW }}

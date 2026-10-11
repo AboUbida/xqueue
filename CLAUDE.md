@@ -16,8 +16,9 @@ Buffer, which publishes to X. Runs on GitHub Actions in `AboUbida/xqueue`.
   for now; restore with `git checkout 84b74a8~1 -- sources.txt`.
 - `cards.py`, `assets/` — drawn headline cards (Pillow + libraqm). Used first by
   default (own visuals count as original content on X); the source's photo is the
-  fallback. `OWN_CARDS=0` reverses that. Needs `MEDIA_REPO`/`MEDIA_TOKEN` to host
-  the PNGs; without them posts use the source's photo, as before.
+  fallback. `OWN_CARDS=0` reverses that. The PNGs are hosted on this (public) repo's
+  `media` branch using the workflow's own token; `MEDIA_REPO`/`MEDIA_TOKEN`/
+  `MEDIA_BRANCH` override that. Making the repo private breaks the image links.
 - `history.jsonl` — every post queued (text, source link, image, time); dedupes
   across runs. Committed by the workflow. Deleting a post in Buffer does not
   remove it here, which is intended.

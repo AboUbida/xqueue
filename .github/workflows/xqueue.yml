@@ -38,8 +38,9 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           POSTS_PER_RUN: ${{ vars.POSTS_PER_RUN || '2' }}
           X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
-          MEDIA_REPO: ${{ vars.MEDIA_REPO }}
-          MEDIA_TOKEN: ${{ secrets.MEDIA_TOKEN }}
+          MEDIA_REPO: ${{ vars.MEDIA_REPO || github.repository }}   # cards live on this repo's media branch
+          MEDIA_TOKEN: ${{ secrets.MEDIA_TOKEN || github.token }}
+          MEDIA_BRANCH: ${{ vars.MEDIA_BRANCH || 'media' }}
           CARD_BRAND: ${{ vars.CARD_BRAND }}
           OWN_CARDS: ${{ vars.OWN_CARDS }}
           REVIEW: ${{ vars.REVIEW }}

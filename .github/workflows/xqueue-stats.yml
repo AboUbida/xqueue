@@ -23,7 +23,7 @@ jobs:
           BUFFER_KEY: ${{ secrets.BUFFER_KEY }}
           BUFFER_CHANNEL_ID: ${{ vars.BUFFER_CHANNEL_ID }}
           X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
-          MEDIA_REPO: ${{ vars.MEDIA_REPO }}
+          MEDIA_REPO: ${{ vars.MEDIA_REPO || github.repository }}   # cards live on this repo's media branch
           STATS_DAYS: ${{ vars.STATS_DAYS }}
           STATS_MAX: ${{ vars.STATS_MAX }}
       - name: Save stats
