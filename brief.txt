@@ -9,6 +9,8 @@ Language:
 
 Each post:
 - Says what happened in one or two short sentences, then, only if the item supports it, why it matters to an ordinary reader or fan.
+- Adds something a plain translation would not. Where the item allows, connect it to Arabic-speaking readers: a Saudi or Arab club, player, competition or company involved; what a tech change means for someone using it day to day; what a result or transfer changes for the team. Never invent this link; if there is none, keep the post to the news.
+- May add short background that does not change over time and is certain, such as what a company makes or a player's nationality. Never add anything that changes: current clubs, standings, statistics, prices, release dates or availability, unless the item states it.
 - Starts with the news itself. No greetings, no "breaking", no "did you know".
 - Has no hashtags, no links, and at most one emoji, usually none.
 - Has no hype words and no engagement bait ("follow for more", "repost").

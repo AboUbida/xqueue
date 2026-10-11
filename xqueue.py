@@ -24,12 +24,19 @@ Live mode:     LIVE=1 checks the X accounts for posts published since the last
                check and publishes a rewrite straight away (Buffer "share now")
                instead of queuing, at most LIVE_MAX_PER_RUN per run,
                LIVE_MAX_PER_DAY per day, and LIVE_GAP_MINUTES apart.
-Images:        each post carries the article's own photo when the feed or the
-               article page offers one (ARTICLE_IMAGES=0 turns this off). When
-               there is none, a branded headline card is drawn instead, which
+Review:        REVIEW=1 saves every post as a Buffer draft instead of queuing or
+               publishing it, so a person can edit and approve it first.
+Images:        each post carries a branded headline card drawn by cards.py, which
                needs MEDIA_REPO (public GitHub repo "owner/name" that hosts the
                cards), MEDIA_TOKEN (token that can write to it), MEDIA_BRANCH,
-               CARD_BRAND and Pillow. Failing both, the post goes out as text.
+               CARD_BRAND and Pillow. When no card can be made, the article's own
+               photo is used (ARTICLE_IMAGES=0 turns photos off); OWN_CARDS=0 puts
+               the photo first and draws a card only when there is none. Failing
+               both, the post goes out as text.
+Stats:         STATS=1 reads the account's own recent posts (STATS_DAYS, default 7;
+               at most STATS_MAX reads, default 100), saves their impressions and
+               engagement to stats.json and prints averages by source, category,
+               image kind and hour. Nothing is drafted or posted.
 """
 import datetime
 import email.utils
@@ -70,6 +77,12 @@ MAX_AGE_DAYS = float(os.environ.get("MAX_AGE_DAYS") or "3")
 CREDIT_PREFIX = os.environ.get("CREDIT_PREFIX", "")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 ARTICLE_IMAGES = (os.environ.get("ARTICLE_IMAGES") or "1") != "0"
+OWN_CARDS = (os.environ.get("OWN_CARDS") or "1") != "0"  # prefer our own card over the source's photo
+REVIEW = os.environ.get("REVIEW") == "1"
+STATS = os.environ.get("STATS") == "1"
+STATS_FILE = pathlib.Path(os.environ.get("STATS_FILE", "stats.json"))
+STATS_DAYS = float(os.environ.get("STATS_DAYS") or "7")
+STATS_MAX = max(5, int(os.environ.get("STATS_MAX") or "100"))
 LIVE = os.environ.get("LIVE") == "1"
 LIVE_MAX_PER_RUN = int(os.environ.get("LIVE_MAX_PER_RUN") or "2")
 LIVE_MAX_PER_DAY = int(os.environ.get("LIVE_MAX_PER_DAY") or "12")
@@ -450,7 +463,10 @@ def draft_from_items(items, history, count):
         f"The user message lists numbered items from the account's sources. Choose the {count} most "
         "interesting for the audience, each on a different subject and spread across different sources "
         "where possible, and write one post for each.\n"
-        "- Use only facts stated in the item. Do not add details, numbers, quotes or opinions that are not there.\n"
+        "- Every fact must come from the item. Do not add details, numbers, dates, quotes or opinions that are "
+        "not there; the only exception is the timeless background the brief allows.\n"
+        "- Add value beyond a translation: after the news, say in one short sentence why it matters to "
+        "Arabic-speaking readers, as the brief describes. Leave it out rather than invent it.\n"
         "- Write in your own words. Do not copy the headline or sentences from the item. Items whose source "
         "starts with @ are other accounts' X posts: report the news in them, never repost their wording.\n"
         "- Only items that carry news count. Skip anything personal or non-news: the author's opinions, "
@@ -511,8 +527,9 @@ def find_channel():
 
 def queued_count(org, channel):
     """How many posts are already waiting in this channel's queue, or None if Buffer will not say."""
-    q = ("{ posts(input: { organizationId: %s, filter: { status: [scheduled], channelIds: [%s] } }) "
-         "{ edges { node { id } } } }") % (json.dumps(org), json.dumps(channel))
+    statuses = "draft, scheduled" if REVIEW else "scheduled"  # unapproved drafts still fill the queue
+    q = ("{ posts(input: { organizationId: %s, filter: { status: [%s], channelIds: [%s] } }) "
+         "{ edges { node { id } } } }") % (json.dumps(org), statuses, json.dumps(channel))
     out = post_json(BUFFER_URL, os.environ["BUFFER_KEY"], {"query": q}, attempts=3)
     try:
         return len(out["data"]["posts"]["edges"])
@@ -537,12 +554,13 @@ def _create(text, channel, image_url, now=False):
     # json.dumps gives a valid GraphQL string literal; ensure_ascii=False keeps Arabic and emoji intact.
     literal = json.dumps(text, ensure_ascii=False)
     assets = " assets: [{ image: { url: %s } }]," % json.dumps(image_url) if image_url else ""
+    draft = " saveToDraft: true," if REVIEW else ""
     query = (
-        "mutation { createPost(input: { text: %s, channelId: %s,%s "
+        "mutation { createPost(input: { text: %s, channelId: %s,%s%s "
         "schedulingType: automatic, mode: %s }) { "
         "... on PostActionSuccess { post { id } } "
         "... on MutationError { message } } }"
-    ) % (literal, json.dumps(channel), assets, "now" if now else "addToQueue")
+    ) % (literal, json.dumps(channel), assets, draft, "shareNow" if now and not REVIEW else "addToQueue")
     out = post_json(BUFFER_URL, os.environ["BUFFER_KEY"], {"query": query})
     if out.get("errors"):
         return None, out["errors"][0].get("message", "unknown GraphQL error")
@@ -584,8 +602,95 @@ def make_card(draft, brand, number):
         return path, None
 
 
+# ---------- stats ----------
+
+def post_key(text):
+    """Comparable form of a post: X adds a t.co link for attached images and escapes &, < and >."""
+    text = re.sub(r"\s*https://t\.co/\S+", "", html.unescape(text or ""))
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def stats(handle):
+    """Save impressions and engagement of the account's recent posts and print what performs best."""
+    if not X_TOKEN:
+        sys.exit("STATS needs X_BEARER_TOKEN.")
+    user = (x_get(f"/users/by/username/{handle.lstrip('@')}", {}) or {}).get("data")
+    if not user:
+        sys.exit(f"Could not look up @{handle} on X.")
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=STATS_DAYS)
+    params = {"max_results": min(100, STATS_MAX), "exclude": "retweets,replies",
+              "start_time": since.strftime("%Y-%m-%dT%H:%M:%SZ"), "tweet.fields": "created_at,public_metrics"}
+    posts = []
+    while len(posts) < STATS_MAX:  # every post read is billed, so stop at STATS_MAX
+        out = x_get(f"/users/{user['id']}/tweets", params) or {}
+        posts += out.get("data") or []
+        token = out.get("meta", {}).get("next_token")
+        if not token:
+            break
+        params.update(pagination_token=token, max_results=max(5, min(100, STATS_MAX - len(posts))))
+    categories = {}
+    if XSOURCES.exists():
+        for line in XSOURCES.read_text(encoding="utf-8").splitlines():
+            parts = [p.strip() for p in line.split("|")]
+            if parts[0].startswith("@"):
+                categories[parts[0].lstrip("@").lower()] = parts[1] if len(parts) > 1 else ""
+    by_text = {post_key(h["text"]): h for h in load_history()}
+    saved = json.loads(STATS_FILE.read_text(encoding="utf-8")) if STATS_FILE.exists() else {}
+    checked = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    for post in posts:
+        h = by_text.get(post_key(post["text"]), {})
+        m = re.match(r"https://x\.com/(\w+)/status/", h.get("link") or "")
+        source = f"@{m.group(1)}" if m else (urllib.parse.urlparse(h["link"]).netloc if h.get("link") else "?")
+        image = h.get("image") or ""
+        metrics = post.get("public_metrics", {})
+        saved[post["id"]] = {
+            "at": post.get("created_at"), "text": post["text"], "source": source,
+            "category": categories.get(source.lstrip("@").lower(), "") if m else "",
+            "image": "none" if not image else "card" if MEDIA_REPO and MEDIA_REPO.split("/")[-1] in image else "photo",
+            "live": bool(h.get("live")),
+            "impressions": metrics.get("impression_count", 0),
+            "engagements": sum(metrics.get(k, 0) for k in
+                               ("like_count", "retweet_count", "reply_count", "quote_count", "bookmark_count")),
+            **{k.removesuffix("_count"): metrics.get(k, 0) for k in
+               ("like_count", "retweet_count", "reply_count", "quote_count", "bookmark_count")},
+            "checked": checked,
+        }
+    STATS_FILE.write_text(json.dumps(saved, indent=1, ensure_ascii=False), encoding="utf-8")
+    print(f"STATS {len(posts)} posts from the last {STATS_DAYS:g} days read; {len(saved)} posts in {STATS_FILE}")
+    if not saved:
+        return
+
+    def hour(row):  # Riyadh time
+        when = parse_date(row["at"] or "")
+        return f"{(when.hour + 3) % 24:02d}h" if when else "?"
+
+    lines = [f"## @{user['username']}: {len(saved)} posts", ""]
+    groups = [("source", lambda r: r["source"]), ("category", lambda r: r["category"] or "-"),
+              ("image", lambda r: r["image"]), ("mode", lambda r: "live" if r["live"] else "queue"),
+              ("hour (Riyadh)", hour)]
+    for title, key in groups:
+        buckets = {}
+        for row in saved.values():
+            buckets.setdefault(key(row), []).append(row)
+        lines += [f"| {title} | posts | avg views | avg engagements |", "|---|---:|---:|---:|"]
+        for name, rows in sorted(buckets.items(), key=lambda kv: -sum(r["impressions"] for r in kv[1]) / len(kv[1])):
+            lines.append(f"| {name} | {len(rows)} | {sum(r['impressions'] for r in rows) / len(rows):.0f} "
+                         f"| {sum(r['engagements'] for r in rows) / len(rows):.1f} |")
+        lines.append("")
+    lines += ["### Top posts", ""]
+    for row in sorted(saved.values(), key=lambda r: -r["impressions"])[:5]:
+        lines.append(f"- {row['impressions']} views, {row['engagements']} engagements: {row['text'][:90]}")
+    report = "\n".join(lines)
+    print(report)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+            f.write(report + "\n")
+
+
 def main():
     org, channel, channel_name = find_channel()  # read-only, so it also runs in a dry run to check the Buffer key
+    if STATS:
+        return stats(os.environ.get("STATS_HANDLE") or channel_name)
     brand = CARD_BRAND or f"@{channel_name}"
     if cards is None:
         print("CARDS off: Pillow with Arabic support is not installed")
@@ -657,14 +762,15 @@ def main():
         if ARTICLE_IMAGES and link:
             photo = draft.get("image") or page_image(link)
         card = card_url = None
-        if not photo:  # no real picture: fall back to a drawn headline card
+        if OWN_CARDS or not photo:  # our own card, or a fallback when there is no real picture
             card, card_url = make_card(draft, brand, queued + shown + 1)
+        images = (card_url, photo) if OWN_CARDS else (photo, card_url)
         if DRY_RUN:
-            extra = f"\n      photo: {photo}" if photo else (f"\n      card: {card}" if card else "\n      image: none")
+            extra = "".join(f"\n      {k}: {v}" for k, v in (("card", card), ("photo", photo)) if v) or "\n      image: none"
             print(f"DRY   {text}{extra}\n")
             shown += 1
             continue
-        post_id, err, image_url = queue(text, channel, (photo, card_url), now=LIVE)
+        post_id, err, image_url = queue(text, channel, images, now=LIVE)
         if err:
             # Most likely the free plan's queue cap; stop and try again next run.
             sys.exit(f"Buffer rejected the post: {err}")
@@ -673,11 +779,11 @@ def main():
                                 "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")},
                                ensure_ascii=False) + "\n")
         queued += 1
-        tag = "[photo] " if image_url and image_url == photo else ("[card] " if image_url else "")
-        print(f"{'LIVE  ' if LIVE else 'QUEUED'} {post_id}  {tag}{text[:60]}")
+        tag = "[card] " if image_url and image_url == card_url else ("[photo] " if image_url else "")
+        print(f"{'DRAFT ' if REVIEW else 'LIVE  ' if LIVE else 'QUEUED'} {post_id}  {tag}{text[:60]}")
         if LIVE and queued < count:
             break  # one live post per run keeps a natural pace; the next check picks up the rest
-    print(f"done: {queued} {'published' if LIVE else 'queued'}")
+    print(f"done: {queued} {'saved as drafts' if REVIEW else 'published' if LIVE else 'queued'}")
 
 
 if __name__ == "__main__":

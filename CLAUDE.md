@@ -14,14 +14,20 @@ Buffer, which publishes to X. Runs on GitHub Actions in `AboUbida/xqueue`.
 - `xsources.txt` — X accounts to read (`@handle | category`).
 - `sources.txt` — optional RSS feeds (same `Name | URL | category` format). Removed
   for now; restore with `git checkout 84b74a8~1 -- sources.txt`.
-- `cards.py`, `assets/` — drawn headline cards (Pillow + libraqm), used only when a
-  post has no real photo. Needs `MEDIA_REPO`/`MEDIA_TOKEN` to host the PNGs.
+- `cards.py`, `assets/` — drawn headline cards (Pillow + libraqm). Used first by
+  default (own visuals count as original content on X); the source's photo is the
+  fallback. `OWN_CARDS=0` reverses that. Needs `MEDIA_REPO`/`MEDIA_TOKEN` to host
+  the PNGs; without them posts use the source's photo, as before.
 - `history.jsonl` — every post queued (text, source link, image, time); dedupes
   across runs. Committed by the workflow. Deleting a post in Buffer does not
   remove it here, which is intended.
 - `xstate.json` — last post id seen per X account; committed by the workflow.
+- `stats.json` — impressions/engagement per own post, written by stats mode
+  (`STATS=1`, workflow `xqueue-stats.yml`, weekly); prints averages by source,
+  category, image kind, live/queue and hour.
 - `.github/workflows/xqueue.yml` — queue mode, cron 09:17/13:17/17:17/21:17 Riyadh.
 - `.github/workflows/xqueue-live.yml` — live mode, cron every 10 min.
+- `.github/workflows/xqueue-stats.yml` — stats mode, Mondays.
 
 ## Services and secrets (GitHub repo secrets / variables)
 - `BUFFER_KEY` (secret) — Buffer GraphQL API, https://api.buffer.com. Free plan:
@@ -32,8 +38,16 @@ Buffer, which publishes to X. Runs on GitHub Actions in `AboUbida/xqueue`.
   (GitHub Models was retired 2026-07-30; do not use it.)
 - `X_BEARER_TOKEN` (secret) — X API app-only token, pay-per-use (~$0.005/read).
   Reads only posts newer than `xstate.json`, excluding replies and retweets.
-- Optional vars: `QUEUE_TARGET`, `LIVE_MAX_PER_DAY`, `LIVE_GAP_MINUTES`,
+- `REVIEW=1` (var) — save posts as Buffer drafts for a person to edit and approve
+  instead of queuing/publishing. Drafts count toward `QUEUE_TARGET`.
+- Optional vars: `QUEUE_TARGET`, `OWN_CARDS`, `STATS_DAYS`, `STATS_MAX`, `LIVE_MAX_PER_DAY`, `LIVE_GAP_MINUTES`,
   `ARTICLE_IMAGES=0` (no photos), `CREDIT_PREFIX` (adds a source line).
+
+## Monetization context
+X replaced Creator Revenue Sharing with Original Content Rewards (2026-09-08):
+Premium, 500 verified followers, 500K verified home-timeline impressions in 90
+days, and it excludes automated, aggregated and copied content. Hence the push
+toward review mode, own cards and value-adding posts rather than plain rewrites.
 
 ## Known issues
 - GitHub's cron scheduler has never fired for this repo (manual runs work). The

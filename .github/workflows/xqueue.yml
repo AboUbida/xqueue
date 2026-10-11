@@ -41,6 +41,8 @@ jobs:
           MEDIA_REPO: ${{ vars.MEDIA_REPO }}
           MEDIA_TOKEN: ${{ secrets.MEDIA_TOKEN }}
           CARD_BRAND: ${{ vars.CARD_BRAND }}
+          OWN_CARDS: ${{ vars.OWN_CARDS }}
+          REVIEW: ${{ vars.REVIEW }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
       - name: Keep the cards for review
         if: always()

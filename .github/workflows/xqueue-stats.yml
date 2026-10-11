@@ -1,0 +1,34 @@
+name: xqueue-stats
+
+on:
+  schedule:
+    - cron: '0 5 * * 1'   # Mondays 08:00 Riyadh
+  workflow_dispatch:
+
+permissions:
+  contents: write   # save stats.json back to the repo
+
+concurrency: xqueue
+
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the account's post metrics
+        # About $0.005 per post read; STATS_MAX caps the reads (default 100).
+        run: python3 xqueue.py
+        env:
+          STATS: '1'
+          BUFFER_KEY: ${{ secrets.BUFFER_KEY }}
+          BUFFER_CHANNEL_ID: ${{ vars.BUFFER_CHANNEL_ID }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+          MEDIA_REPO: ${{ vars.MEDIA_REPO }}
+          STATS_DAYS: ${{ vars.STATS_DAYS }}
+          STATS_MAX: ${{ vars.STATS_MAX }}
+      - name: Save stats
+        run: |
+          git add stats.json 2>/dev/null || exit 0
+          git diff --cached --quiet && exit 0
+          git -c user.name=xqueue -c user.email=xqueue@users.noreply.github.com commit -m "Update post stats"
+          git pull --rebase --quiet && git push
