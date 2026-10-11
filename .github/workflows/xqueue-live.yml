@@ -1,0 +1,42 @@
+name: xqueue-live
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 minutes; GitHub often runs these a few minutes late
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Show what would be published without publishing
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency: xqueue   # never overlaps the queue-filling workflow
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the accounts and publish news
+        run: python3 xqueue.py
+        env:
+          LIVE: '1'
+          BUFFER_KEY: ${{ secrets.BUFFER_KEY }}
+          BUFFER_CHANNEL_ID: ${{ vars.BUFFER_CHANNEL_ID }}
+          LLM_URL: ${{ vars.LLM_URL }}
+          LLM_KEY: ${{ secrets.LLM_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+          LIVE_MAX_PER_DAY: ${{ vars.LIVE_MAX_PER_DAY }}
+          LIVE_GAP_MINUTES: ${{ vars.LIVE_GAP_MINUTES }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+      - name: Save state
+        if: always()
+        run: |
+          git add history.jsonl xstate.json 2>/dev/null || exit 0
+          git diff --cached --quiet && exit 0
+          git -c user.name=xqueue -c user.email=xqueue@users.noreply.github.com commit -m "Update live state"
+          git pull --rebase --quiet && git push

@@ -20,6 +20,10 @@ X accounts:    list handles in xsources.txt (one per line, "@handle | category")
                and set X_BEARER_TOKEN; their recent public posts are read through
                the X API (pay-per-use) and rewritten like feed items. X_MAX_READS
                caps posts read per account per run (default 10).
+Live mode:     LIVE=1 checks the X accounts for posts published since the last
+               check and publishes a rewrite straight away (Buffer "share now")
+               instead of queuing, at most LIVE_MAX_PER_RUN per run,
+               LIVE_MAX_PER_DAY per day, and LIVE_GAP_MINUTES apart.
 Images:        each post carries the article's own photo when the feed or the
                article page offers one (ARTICLE_IMAGES=0 turns this off). When
                there is none, a branded headline card is drawn instead, which
@@ -66,6 +70,10 @@ MAX_AGE_DAYS = float(os.environ.get("MAX_AGE_DAYS") or "3")
 CREDIT_PREFIX = os.environ.get("CREDIT_PREFIX", "")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 ARTICLE_IMAGES = (os.environ.get("ARTICLE_IMAGES") or "1") != "0"
+LIVE = os.environ.get("LIVE") == "1"
+LIVE_MAX_PER_RUN = int(os.environ.get("LIVE_MAX_PER_RUN") or "2")
+LIVE_MAX_PER_DAY = int(os.environ.get("LIVE_MAX_PER_DAY") or "12")
+LIVE_GAP_MINUTES = float(os.environ.get("LIVE_GAP_MINUTES") or "20")
 XSOURCES = pathlib.Path(os.environ.get("XSOURCES_FILE", "xsources.txt"))
 XSTATE = pathlib.Path(os.environ.get("XSTATE_FILE", "xstate.json"))  # last post id seen per account
 X_API = os.environ.get("X_API_URL") or "https://api.x.com/2"
@@ -513,27 +521,28 @@ def queued_count(org, channel):
         return None
 
 
-def queue(text, channel, image_urls=()):
-    """Queue the post with the first image Buffer accepts. Returns (post id, error, image URL attached)."""
+def queue(text, channel, image_urls=(), now=False):
+    """Queue (or, with now=True, publish) the post with the first image Buffer accepts.
+    Returns (post id, error, image URL attached)."""
     for image_url in [u for u in image_urls if u]:
-        post_id, err = _create(text, channel, image_url)
+        post_id, err = _create(text, channel, image_url, now)
         if not err:
             return post_id, None, image_url
         print(f"WARN  Buffer would not take {image_url[:80]} ({err[:100]}); trying without it")
-    post_id, err = _create(text, channel, None)
+    post_id, err = _create(text, channel, None, now)
     return post_id, err, None
 
 
-def _create(text, channel, image_url):
+def _create(text, channel, image_url, now=False):
     # json.dumps gives a valid GraphQL string literal; ensure_ascii=False keeps Arabic and emoji intact.
     literal = json.dumps(text, ensure_ascii=False)
     assets = " assets: [{ image: { url: %s } }]," % json.dumps(image_url) if image_url else ""
     query = (
         "mutation { createPost(input: { text: %s, channelId: %s,%s "
-        "schedulingType: automatic, mode: addToQueue }) { "
+        "schedulingType: automatic, mode: %s }) { "
         "... on PostActionSuccess { post { id } } "
         "... on MutationError { message } } }"
-    ) % (literal, json.dumps(channel), assets)
+    ) % (literal, json.dumps(channel), assets, "now" if now else "addToQueue")
     out = post_json(BUFFER_URL, os.environ["BUFFER_KEY"], {"query": query})
     if out.get("errors"):
         return None, out["errors"][0].get("message", "unknown GraphQL error")
@@ -586,30 +595,51 @@ def main():
         sys.exit(f"Missing {BRIEF}: write a few lines on audience, tone and language.")
     if not LLM_KEY:
         sys.exit("Missing LLM_KEY: add the model API key as a repository secret named LLM_KEY.")
-    waiting = queued_count(org, channel)
-    if waiting is None:
-        count = FALLBACK_COUNT
-    else:
-        count = max(0, min(QUEUE_TARGET - waiting, MAX_PER_RUN))
-    print(f"QUEUE {waiting if waiting is not None else '?'} waiting, target {QUEUE_TARGET}: adding {count}")
-    if DRY_RUN:
-        count = max(count, 2)  # always show some drafts in a dry run
-    if count == 0:
-        return
-
     history = load_history()
     seen_text = {h["text"].casefold() for h in history}
     seen_links = {h["link"] for h in history if h.get("link")}
 
-    if SOURCES.exists() or XSOURCES.exists():
-        items = load_items(seen_links) if SOURCES.exists() else \
-            [i for src in load_x_items(seen_links) for i in src][:30]
-        if not items:
-            print("No fresh items in any source; nothing to post this run.")
+    if LIVE:
+        # Publish straight away, but keep the account looking human: a cap per run and per day,
+        # and a minimum gap between live posts.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        live_times = [datetime.datetime.fromisoformat(h["at"]) for h in history if h.get("live") and h.get("at")]
+        today = [t for t in live_times if now - t < datetime.timedelta(days=1)]
+        last_gap = (now - max(live_times)).total_seconds() / 60 if live_times else None
+        if len(today) >= LIVE_MAX_PER_DAY:
+            print(f"LIVE  {len(today)} live posts in the last 24h already (cap {LIVE_MAX_PER_DAY}); waiting")
             return
-        drafts = draft_from_items(items, history, count + 2)  # extras cover drafts the checks reject
+        if last_gap is not None and last_gap < LIVE_GAP_MINUTES and not DRY_RUN:
+            print(f"LIVE  last live post was {last_gap:.0f} min ago (gap {LIVE_GAP_MINUTES:.0f}); waiting")
+            return
+        count = min(LIVE_MAX_PER_RUN, LIVE_MAX_PER_DAY - len(today))
+        if not XSOURCES.exists():
+            sys.exit("LIVE mode needs xsources.txt with at least one X account.")
+        items = [i for src in load_x_items(seen_links) for i in src][:30]
+        if not items:
+            print("LIVE  nothing new from the accounts since the last check.")
+            return
+        drafts = draft_from_items(items, history, count)
     else:
-        drafts = draft_from_topic(history, count + 2)
+        waiting = queued_count(org, channel)
+        if waiting is None:
+            count = FALLBACK_COUNT
+        else:
+            count = max(0, min(QUEUE_TARGET - waiting, MAX_PER_RUN))
+        print(f"QUEUE {waiting if waiting is not None else '?'} waiting, target {QUEUE_TARGET}: adding {count}")
+        if DRY_RUN:
+            count = max(count, 2)  # always show some drafts in a dry run
+        if count == 0:
+            return
+        if SOURCES.exists() or XSOURCES.exists():
+            items = load_items(seen_links) if SOURCES.exists() else \
+                [i for src in load_x_items(seen_links) for i in src][:30]
+            if not items:
+                print("No fresh items in any source; nothing to post this run.")
+                return
+            drafts = draft_from_items(items, history, count + 2)  # extras cover drafts the checks reject
+        else:
+            drafts = draft_from_topic(history, count + 2)
 
     queued = shown = 0
     for draft in drafts:
@@ -634,17 +664,20 @@ def main():
             print(f"DRY   {text}{extra}\n")
             shown += 1
             continue
-        post_id, err, image_url = queue(text, channel, (photo, card_url))
+        post_id, err, image_url = queue(text, channel, (photo, card_url), now=LIVE)
         if err:
             # Most likely the free plan's queue cap; stop and try again next run.
             sys.exit(f"Buffer rejected the post: {err}")
         with HISTORY.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"id": post_id, "text": text, "link": link, "image": image_url},
+            f.write(json.dumps({"id": post_id, "text": text, "link": link, "image": image_url, "live": LIVE,
+                                "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")},
                                ensure_ascii=False) + "\n")
         queued += 1
         tag = "[photo] " if image_url and image_url == photo else ("[card] " if image_url else "")
-        print(f"QUEUED {post_id}  {tag}{text[:60]}")
-    print(f"done: {queued} queued")
+        print(f"{'LIVE  ' if LIVE else 'QUEUED'} {post_id}  {tag}{text[:60]}")
+        if LIVE and queued < count:
+            break  # one live post per run keeps a natural pace; the next check picks up the rest
+    print(f"done: {queued} {'published' if LIVE else 'queued'}")
 
 
 if __name__ == "__main__":
