@@ -40,3 +40,4 @@ jobs:
           git diff --cached --quiet && exit 0
           git -c user.name=xqueue -c user.email=xqueue@users.noreply.github.com commit -m "Update live state"
           git pull --rebase --quiet && git push
+
