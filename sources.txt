@@ -1,12 +1,13 @@
 # One feed per line. Lines starting with # are ignored.
-# Format:  Name shown as the source | feed URL     (the name is optional)
+# Format:  Name | feed URL | category   (name and category are optional;
+#          category sets the image card colour and label: tech or football)
 # Posts are spread across the feeds, so the mix here sets the mix of topics.
 
 # Tech
-البوابة التقنية | https://aitnews.com/feed/
-عالم التقنية | https://www.tech-wd.com/wd/feed/
+البوابة التقنية | https://aitnews.com/feed/ | tech
+عالم التقنية | https://www.tech-wd.com/wd/feed/ | tech
 
 # Football
-الرياضية | https://arriyadiyah.com/rss
+الرياضية | https://arriyadiyah.com/rss | football
 # Unverified extra football feed (Arab football from FilGoal); remove the # to try it:
-# في الجول | https://www.filgoal.com/section/9/rss/%D8%A7%D9%84%D9%88%D8%B7%D9%86-%D8%A7%D9%84%D8%B9%D8%B1%D8%A8%D9%8A
+# في الجول | https://www.filgoal.com/section/9/rss/%D8%A7%D9%84%D9%88%D8%B7%D9%86-%D8%A7%D9%84%D8%B9%D8%B1%D8%A8%D9%8A | football

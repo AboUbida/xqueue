@@ -20,8 +20,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install image card support
+        # If this fails the posts still go out, as text only.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libfribidi0 || echo "libfribidi not installed"
+          python -m pip install --quiet pillow || echo "Pillow not installed"
       - name: Draft and queue posts
-        run: python3 xqueue.py
+        run: python xqueue.py
         env:
           BUFFER_KEY: ${{ secrets.BUFFER_KEY }}
           BUFFER_CHANNEL_ID: ${{ vars.BUFFER_CHANNEL_ID }}
@@ -29,7 +37,18 @@ jobs:
           LLM_KEY: ${{ secrets.LLM_KEY }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           POSTS_PER_RUN: ${{ vars.POSTS_PER_RUN || '2' }}
+          MEDIA_REPO: ${{ vars.MEDIA_REPO }}
+          MEDIA_TOKEN: ${{ secrets.MEDIA_TOKEN }}
+          CARD_BRAND: ${{ vars.CARD_BRAND }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+      - name: Keep the cards for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cards
+          path: cards/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Save history
         if: always()
         run: |
@@ -37,4 +56,4 @@ jobs:
           git add history.jsonl
           git diff --cached --quiet && exit 0
           git -c user.name=xqueue -c user.email=xqueue@users.noreply.github.com commit -m "Update post history"
-          git push
+          git pull --rebase --quiet && git push
