@@ -16,6 +16,10 @@ Optional env:  BUFFER_CHANNEL_ID (found automatically when the account has one
                POSTS_PER_RUN (used only if the queue size cannot be read),
                BRIEF_FILE, SOURCES_FILE, HISTORY_FILE, MAX_AGE_DAYS,
                CREDIT_PREFIX, RETRY_BASE_SECONDS, DRY_RUN=1
+X accounts:    list handles in xsources.txt (one per line, "@handle | category")
+               and set X_BEARER_TOKEN; their recent public posts are read through
+               the X API (pay-per-use) and rewritten like feed items. X_MAX_READS
+               caps posts read per account per run (default 10).
 Images:        each post carries the article's own photo when the feed or the
                article page offers one (ARTICLE_IMAGES=0 turns this off). When
                there is none, a branded headline card is drawn instead, which
@@ -33,6 +37,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -61,6 +66,11 @@ MAX_AGE_DAYS = float(os.environ.get("MAX_AGE_DAYS") or "3")
 CREDIT_PREFIX = os.environ.get("CREDIT_PREFIX", "")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 ARTICLE_IMAGES = (os.environ.get("ARTICLE_IMAGES") or "1") != "0"
+XSOURCES = pathlib.Path(os.environ.get("XSOURCES_FILE", "xsources.txt"))
+XSTATE = pathlib.Path(os.environ.get("XSTATE_FILE", "xstate.json"))  # last post id seen per account
+X_API = os.environ.get("X_API_URL") or "https://api.x.com/2"
+X_TOKEN = os.environ.get("X_BEARER_TOKEN", "").strip()
+X_MAX_READS = max(5, min(100, int(os.environ.get("X_MAX_READS") or "10")))
 MAX_LEN = 280
 USER_AGENT = "xqueue/1.1 (personal RSS reader)"
 MEDIA_REPO = os.environ.get("MEDIA_REPO", "").strip()
@@ -259,6 +269,106 @@ def read_feed(name, url):
     return items
 
 
+# ---------- X accounts ----------
+
+def x_get(path, params):
+    """GET from the X API with the app bearer token; returns parsed JSON, or None after a non-fatal failure."""
+    url = f"{X_API}{path}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {X_TOKEN}", "User-Agent": USER_AGENT})
+    for attempt in (1, 2, 3):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")[:300]
+            if e.code in (401, 403):
+                sys.exit(f"X API refused the token ({e.code}): {body}")
+            if e.code not in TRANSIENT or attempt == 3:
+                print(f"WARN  X API {path}: HTTP {e.code} {body}")
+                return None
+            wait = e.headers.get("Retry-After")
+            time.sleep(min(int(wait) if wait and wait.isdigit() else RETRY_BASE * attempt, 120))
+        except (OSError, ValueError) as e:
+            print(f"WARN  X API {path}: {e}")
+            return None
+
+
+def load_x_items(used_links):
+    """Recent public posts of the accounts in xsources.txt, as items the drafter understands."""
+    lines = [l.strip() for l in XSOURCES.read_text(encoding="utf-8").splitlines()]
+    wanted = {}
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        handle = parts[0].lstrip("@").lower()
+        if re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle):
+            wanted[handle] = parts[1] if len(parts) > 1 else ""
+    if not wanted:
+        return []
+    if not X_TOKEN:
+        print("WARN  xsources.txt is set but X_BEARER_TOKEN is missing; skipping X accounts")
+        return []
+    state = json.loads(XSTATE.read_text(encoding="utf-8")) if XSTATE.exists() else {}
+    users = x_get("/users/by", {"usernames": ",".join(wanted)})
+    if not users or not users.get("data"):
+        print(f"WARN  could not look up X accounts: {str(users)[:200]}")
+        return []
+    for err in users.get("errors", []):
+        print(f"WARN  X account not found: {err.get('value')}")
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=MAX_AGE_DAYS)
+    per_source = []
+    for user in users["data"]:
+        handle = user["username"].lower()
+        params = {
+            "max_results": X_MAX_READS,
+            "exclude": "retweets,replies",
+            "tweet.fields": "created_at,entities,attachments",
+            "expansions": "attachments.media_keys",
+            "media.fields": "type,url,preview_image_url",
+        }
+        if state.get(handle):
+            params["since_id"] = state[handle]  # only posts newer than last run: keeps the per-read bill small
+        else:
+            params["start_time"] = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+        out = x_get(f"/users/{user['id']}/tweets", params)
+        posts = (out or {}).get("data") or []
+        media = {m["media_key"]: m for m in (out or {}).get("includes", {}).get("media", [])}
+        if out and out.get("meta", {}).get("newest_id"):
+            state[handle] = out["meta"]["newest_id"]
+        items = []
+        for post in posts:
+            text = post.get("text", "")
+            for u in post.get("entities", {}).get("urls", []):  # drop t.co links; keep the text readable
+                text = text.replace(u.get("url", ""), "")
+            text = re.sub(r"\s+", " ", text).strip()
+            if len(text) < 25:
+                continue  # a bare photo or a one-word post gives the drafter nothing to work with
+            image = ""
+            for key in post.get("attachments", {}).get("media_keys", []):
+                m = media.get(key, {})
+                if m.get("type") == "photo" and m.get("url"):
+                    image = m["url"]
+                    break
+            link = f"https://x.com/{user['username']}/status/{post['id']}"
+            if link in used_links:
+                continue
+            items.append({
+                "source": f"@{user['username']}",
+                "title": text[:120],
+                "link": link,
+                "summary": text[120:500],  # the rest, so the model is not shown the same words twice
+                "date": parse_date(post.get("created_at", "")),
+                "image": image,
+                "category": wanted.get(handle, ""),
+            })
+        print(f"XACC  @{user['username']}: {len(posts)} new posts read, {len(items)} usable")
+        per_source.append(items[:10])
+    if not DRY_RUN:
+        XSTATE.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    return per_source
+
+
 def load_items(used_links):
     """Fresh, unused items from every feed in sources.txt, taken in turn from each source."""
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=MAX_AGE_DAYS)
@@ -279,6 +389,8 @@ def load_items(used_links):
         fresh = [i for i in found if i["link"] not in used_links and (i["date"] is None or i["date"] >= cutoff)]
         print(f"FEED  {url}: {len(found)} items, {len(fresh)} fresh and unused")
         per_source.append(sorted(fresh, key=lambda i: i["date"] or floor, reverse=True)[:10])
+    if XSOURCES.exists():
+        per_source += load_x_items(used_links)
     # Round-robin so every source is represented, not just the one that published last.
     items = [src[n] for n in range(10) for src in per_source if n < len(src)]
     return items[:30]
@@ -331,7 +443,12 @@ def draft_from_items(items, history, count):
         "interesting for the audience, each on a different subject and spread across different sources "
         "where possible, and write one post for each.\n"
         "- Use only facts stated in the item. Do not add details, numbers, quotes or opinions that are not there.\n"
-        "- Write in your own words. Do not copy the headline or sentences from the item.\n"
+        "- Write in your own words. Do not copy the headline or sentences from the item. Items whose source "
+        "starts with @ are other accounts' X posts: report the news in them, never repost their wording.\n"
+        "- Only items that carry news count. Skip anything personal or non-news: the author's opinions, "
+        "jokes, questions to followers, thanks, replies, giveaways, ads, self-promotion, polls, "
+        "'what do you think' posts, and posts that only make sense with an image or video you cannot see. "
+        "If fewer items than asked are real news, return fewer; never pad with weak ones.\n"
         f"- Each post must be under {limit} characters, stand alone, and contain no links. "
         "Do not mention the source or where the news came from.\n"
         "- Also write a headline for the post's image card: the core news in at most 9 words, "
@@ -484,8 +601,9 @@ def main():
     seen_text = {h["text"].casefold() for h in history}
     seen_links = {h["link"] for h in history if h.get("link")}
 
-    if SOURCES.exists():
-        items = load_items(seen_links)
+    if SOURCES.exists() or XSOURCES.exists():
+        items = load_items(seen_links) if SOURCES.exists() else \
+            [i for src in load_x_items(seen_links) for i in src][:30]
         if not items:
             print("No fresh items in any source; nothing to post this run.")
             return

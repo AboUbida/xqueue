@@ -1,0 +1,59 @@
+name: xqueue
+
+on:
+  schedule:
+    - cron: '17 6,10,14,18 * * *'   # 09:17, 13:17, 17:17, 21:17 Riyadh
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print the drafts without queuing them
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # save history.jsonl back to the repo
+
+concurrency: xqueue
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install image card support
+        # If this fails the posts still go out, as text only.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libfribidi0 || echo "libfribidi not installed"
+          python -m pip install --quiet pillow || echo "Pillow not installed"
+      - name: Draft and queue posts
+        run: python xqueue.py
+        env:
+          BUFFER_KEY: ${{ secrets.BUFFER_KEY }}
+          BUFFER_CHANNEL_ID: ${{ vars.BUFFER_CHANNEL_ID }}
+          LLM_URL: ${{ vars.LLM_URL }}
+          LLM_KEY: ${{ secrets.LLM_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          POSTS_PER_RUN: ${{ vars.POSTS_PER_RUN || '2' }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+          MEDIA_REPO: ${{ vars.MEDIA_REPO }}
+          MEDIA_TOKEN: ${{ secrets.MEDIA_TOKEN }}
+          CARD_BRAND: ${{ vars.CARD_BRAND }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+      - name: Keep the cards for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cards
+          path: cards/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Save history
+        if: always()
+        run: |
+          git add history.jsonl xstate.json 2>/dev/null || git add history.jsonl 2>/dev/null || exit 0
+          git diff --cached --quiet && exit 0
+          git -c user.name=xqueue -c user.email=xqueue@users.noreply.github.com commit -m "Update post history"
+          git pull --rebase --quiet && git push

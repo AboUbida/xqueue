@@ -1,0 +1,11 @@
+# X accounts whose public posts are read through the X API and rewritten as news items.
+# One per line:  @handle | category   (category is optional: tech or football)
+# Each run reads up to X_MAX_READS new posts per account (default 10) at X's pay-per-use read price.
+# Add handles below, for example:
+# @SPL | football
+# @aitnews | tech
+@FabrizioRomano | football
+@indykaila | football
+@CFC_Janty | football
+@aitnews | tech
+@theo | tech

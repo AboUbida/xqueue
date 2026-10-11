@@ -19,4 +19,5 @@ Football posts:
 - Report scores, goals and results exactly as the item states them. Never guess a score or a scorer.
 - Nothing about betting or predictions for money.
 
+Skip items that are not news: personal opinions, jokes, chatter with followers, promotions and giveaways.
 Skip any item about politics, war, security, crime, religion, death or disasters, and anything that reads like an advertisement or a discount offer.
